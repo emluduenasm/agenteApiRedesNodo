@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"encoding/json"
 	"errors"
 	"io"
@@ -11,6 +13,8 @@ import (
 	"strings"
 	"time"
 )
+
+var dbpool *pgxpool.Pool
 
 type NetworkSampleRequest struct {
 	EquipoID     string       `json:"equipo_id"`
@@ -52,6 +56,26 @@ type APIResponse struct {
 }
 
 func main() {
+	ctx := context.Background()
+
+	databaseURL := os.Getenv("DATABASE_URL")
+	if strings.TrimSpace(databaseURL) == "" {
+		log.Fatal("DATABASE_URL no está configurada")
+	}
+
+	var err error
+	dbpool, err = pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		log.Fatalf("Error creando pool de conexión: %v", err)
+	}
+	defer dbpool.Close()
+
+	if err := dbpool.Ping(ctx); err != nil {
+		log.Fatalf("No se pudo conectar a PostgreSQL: %v", err)
+	}
+
+	log.Println("Conexión a PostgreSQL OK")
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ping", handlePing)
 	mux.HandleFunc("/api/v1/network-samples", handleNetworkSamples)
@@ -140,8 +164,152 @@ func handleNetworkSamples(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	sampleTime, err := time.Parse(time.RFC3339, req.Timestamp)
+if err != nil {
+	writeJSON(w, http.StatusUnprocessableEntity, APIResponse{
+		OK:        false,
+		Message:   "timestamp inválido",
+		ErrorCode: "validation_error",
+	})
+	return
+}
+
 	score := computeScore(req)
 	estado := computeStatus(score)
+
+	ctx := r.Context()
+
+_, err = dbpool.Exec(ctx, `
+	INSERT INTO network_samples (
+		equipo_id,
+		ubicacion_id,
+		sample_time,
+		agent_version,
+		hostname,
+		tipo_conexion,
+		nombre_interfaz,
+		ssid,
+		bssid,
+		rssi,
+		calidad_senal,
+		ip_local,
+		gateway,
+		latencia_gateway_ms,
+		latencia_servidor_local_ms,
+		latencia_internet_ms,
+		perdida_gateway_pct,
+		perdida_servidor_local_pct,
+		perdida_internet_pct
+	) VALUES (
+		$1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19
+	)
+`,
+	req.EquipoID,
+	req.UbicacionID,
+	sampleTime,
+	req.AgentVersion,
+	req.Hostname,
+	req.Network.TipoConexion,
+	req.Network.NombreIF,
+	req.Network.SSID,
+	req.Network.BSSID,
+	req.Network.RSSI,
+	req.Network.Calidad,
+	req.Network.IPLocal,
+	req.Network.Gateway,
+	req.Tests.LatGatewayMS,
+	req.Tests.LatServidorMS,
+	req.Tests.LatInternetMS,
+	req.Tests.PerdGatewayPct,
+	req.Tests.PerdServidorPct,
+	req.Tests.PerdInternetPct,
+)
+if err != nil {
+	log.Printf("Error insertando network_samples: %v", err)
+	writeJSON(w, http.StatusInternalServerError, APIResponse{
+		OK:        false,
+		Message:   "database insert failed",
+		ErrorCode: "db_insert_error",
+	})
+	return
+}
+
+_, err = dbpool.Exec(ctx, `
+	INSERT INTO network_status_current (
+		equipo_id,
+		ubicacion_id,
+		last_sample_time,
+		updated_at,
+		estado_general,
+		score_salud,
+		tipo_conexion,
+		nombre_interfaz,
+		ssid,
+		bssid,
+		rssi,
+		calidad_senal,
+		ip_local,
+		gateway,
+		latencia_gateway_ms,
+		latencia_servidor_local_ms,
+		latencia_internet_ms,
+		perdida_gateway_pct,
+		perdida_servidor_local_pct,
+		perdida_internet_pct
+	) VALUES (
+		$1,$2,$3,NOW(),$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19
+	)
+	ON CONFLICT (equipo_id)
+	DO UPDATE SET
+		ubicacion_id = EXCLUDED.ubicacion_id,
+		last_sample_time = EXCLUDED.last_sample_time,
+		updated_at = NOW(),
+		estado_general = EXCLUDED.estado_general,
+		score_salud = EXCLUDED.score_salud,
+		tipo_conexion = EXCLUDED.tipo_conexion,
+		nombre_interfaz = EXCLUDED.nombre_interfaz,
+		ssid = EXCLUDED.ssid,
+		bssid = EXCLUDED.bssid,
+		rssi = EXCLUDED.rssi,
+		calidad_senal = EXCLUDED.calidad_senal,
+		ip_local = EXCLUDED.ip_local,
+		gateway = EXCLUDED.gateway,
+		latencia_gateway_ms = EXCLUDED.latencia_gateway_ms,
+		latencia_servidor_local_ms = EXCLUDED.latencia_servidor_local_ms,
+		latencia_internet_ms = EXCLUDED.latencia_internet_ms,
+		perdida_gateway_pct = EXCLUDED.perdida_gateway_pct,
+		perdida_servidor_local_pct = EXCLUDED.perdida_servidor_local_pct,
+		perdida_internet_pct = EXCLUDED.perdida_internet_pct
+`,
+	req.EquipoID,
+	req.UbicacionID,
+	sampleTime,
+	estado,
+	score,
+	req.Network.TipoConexion,
+	req.Network.NombreIF,
+	req.Network.SSID,
+	req.Network.BSSID,
+	req.Network.RSSI,
+	req.Network.Calidad,
+	req.Network.IPLocal,
+	req.Network.Gateway,
+	req.Tests.LatGatewayMS,
+	req.Tests.LatServidorMS,
+	req.Tests.LatInternetMS,
+	req.Tests.PerdGatewayPct,
+	req.Tests.PerdServidorPct,
+	req.Tests.PerdInternetPct,
+)
+if err != nil {
+	log.Printf("Error haciendo upsert en network_status_current: %v", err)
+	writeJSON(w, http.StatusInternalServerError, APIResponse{
+		OK:        false,
+		Message:   "database upsert failed",
+		ErrorCode: "db_upsert_error",
+	})
+	return
+}
 
 	log.Printf(
 		"Sample recibido: equipo_id=%s ubicacion_id=%d tipo=%s if=%s ip=%s gateway=%s ssid=%s rssi=%s lat_int=%s loss_int=%s score=%d estado=%s",
