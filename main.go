@@ -6,10 +6,10 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
-	"os"
 )
 
 type NetworkSampleRequest struct {
@@ -70,7 +70,7 @@ func main() {
 		IdleTimeout:       30 * time.Second,
 	}
 
-	log.Println("Escuchando en http://127.0.0.1:8080")
+	log.Printf("Escuchando en puerto %s", port)
 	log.Fatal(server.ListenAndServe())
 }
 
