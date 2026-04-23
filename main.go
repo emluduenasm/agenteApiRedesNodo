@@ -55,6 +55,43 @@ type APIResponse struct {
 	ErrorCode  string `json:"error,omitempty"`
 }
 
+type CurrentStatusItem struct {
+	EquipoID                string   `json:"equipo_id"`
+	EquipoDescripcion       *string  `json:"equipo_descripcion"`
+	Hostname                *string  `json:"hostname"`
+	UbicacionID             int      `json:"ubicacion_id"`
+	UbicacionNombre         *string  `json:"ubicacion_nombre"`
+	PlantaCodigo            *string  `json:"planta_codigo"`
+	PlantaNombre            *string  `json:"planta_nombre"`
+	AlaCodigo               *string  `json:"ala_codigo"`
+	AlaNombre               *string  `json:"ala_nombre"`
+	Sector                  *string  `json:"sector"`
+	LastSampleTime          string   `json:"last_sample_time"`
+	UpdatedAt               string   `json:"updated_at"`
+	Conectada               bool     `json:"conectada"`
+	EstadoGeneral           string   `json:"estado_general"`
+	ScoreSalud              int      `json:"score_salud"`
+	TipoConexion            string   `json:"tipo_conexion"`
+	NombreInterfaz          *string  `json:"nombre_interfaz"`
+	SSID                    *string  `json:"ssid"`
+	BSSID                   *string  `json:"bssid"`
+	RSSI                    *int     `json:"rssi"`
+	CalidadSenal            *int     `json:"calidad_senal"`
+	IPLocal                 *string  `json:"ip_local"`
+	Gateway                 *string  `json:"gateway"`
+	LatenciaGatewayMS       *int     `json:"latencia_gateway_ms"`
+	LatenciaServidorLocalMS *int     `json:"latencia_servidor_local_ms"`
+	LatenciaInternetMS      *int     `json:"latencia_internet_ms"`
+	PerdidaGatewayPct       *float64 `json:"perdida_gateway_pct"`
+	PerdidaServidorLocalPct *float64 `json:"perdida_servidor_local_pct"`
+	PerdidaInternetPct      *float64 `json:"perdida_internet_pct"`
+}
+
+type CurrentStatusResponse struct {
+	OK    bool                `json:"ok"`
+	Items []CurrentStatusItem `json:"items"`
+}
+
 func main() {
 	ctx := context.Background()
 
@@ -79,6 +116,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ping", handlePing)
 	mux.HandleFunc("/api/v1/network-samples", handleNetworkSamples)
+	mux.HandleFunc("/api/v1/network-status/current", handleNetworkStatusCurrent)
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -103,6 +141,144 @@ func handlePing(w http.ResponseWriter, r *http.Request) {
 		OK:         true,
 		Message:    "pong",
 		ServerTime: time.Now().Format(time.RFC3339),
+	})
+}
+
+func handleNetworkStatusCurrent(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, APIResponse{
+			OK:        false,
+			Message:   "method not allowed",
+			ErrorCode: "method_not_allowed",
+		})
+		return
+	}
+
+	ctx := r.Context()
+
+	rows, err := dbpool.Query(ctx, `
+		SELECT
+			nsc.equipo_id,
+			e.descripcion AS equipo_descripcion,
+			e.hostname,
+			nsc.ubicacion_id,
+			u.nombre AS ubicacion_nombre,
+			u.planta_codigo,
+			dp.nombre AS planta_nombre,
+			u.ala_codigo,
+			da.nombre AS ala_nombre,
+			u.sector,
+			nsc.last_sample_time,
+			nsc.updated_at,
+			CASE
+				WHEN nsc.last_sample_time >= NOW() - INTERVAL '5 minutes' THEN true
+				ELSE false
+			END AS conectada,
+			nsc.estado_general,
+			nsc.score_salud,
+			nsc.tipo_conexion,
+			nsc.nombre_interfaz,
+			nsc.ssid,
+			nsc.bssid,
+			nsc.rssi,
+			nsc.calidad_senal,
+			CAST(nsc.ip_local AS TEXT),
+			CAST(nsc.gateway AS TEXT),
+			nsc.latencia_gateway_ms,
+			nsc.latencia_servidor_local_ms,
+			nsc.latencia_internet_ms,
+			nsc.perdida_gateway_pct,
+			nsc.perdida_servidor_local_pct,
+			nsc.perdida_internet_pct
+		FROM network_status_current nsc
+		LEFT JOIN equipos e
+			ON e.equipo_id = nsc.equipo_id
+		LEFT JOIN ubicaciones u
+			ON u.id = nsc.ubicacion_id
+		LEFT JOIN dom_plantas dp
+			ON dp.codigo = u.planta_codigo
+		LEFT JOIN dom_alas da
+			ON da.codigo = u.ala_codigo
+		ORDER BY nsc.updated_at DESC
+	`)
+	if err != nil {
+		log.Printf("Error consultando network_status_current: %v", err)
+		writeJSON(w, http.StatusInternalServerError, APIResponse{
+			OK:        false,
+			Message:   "database query failed",
+			ErrorCode: "db_query_error",
+		})
+		return
+	}
+	defer rows.Close()
+
+	items := make([]CurrentStatusItem, 0)
+
+	for rows.Next() {
+	var item CurrentStatusItem
+	var lastSampleTime time.Time
+	var updatedAt time.Time
+
+	err := rows.Scan(
+		&item.EquipoID,
+		&item.EquipoDescripcion,
+		&item.Hostname,
+		&item.UbicacionID,
+		&item.UbicacionNombre,
+		&item.PlantaCodigo,
+		&item.PlantaNombre,
+		&item.AlaCodigo,
+		&item.AlaNombre,
+		&item.Sector,
+		&lastSampleTime,
+		&updatedAt,
+		&item.Conectada,
+		&item.EstadoGeneral,
+		&item.ScoreSalud,
+		&item.TipoConexion,
+		&item.NombreInterfaz,
+		&item.SSID,
+		&item.BSSID,
+		&item.RSSI,
+		&item.CalidadSenal,
+		&item.IPLocal,
+		&item.Gateway,
+		&item.LatenciaGatewayMS,
+		&item.LatenciaServidorLocalMS,
+		&item.LatenciaInternetMS,
+		&item.PerdidaGatewayPct,
+		&item.PerdidaServidorLocalPct,
+		&item.PerdidaInternetPct,
+	)
+	if err != nil {
+		log.Printf("Error escaneando fila de network_status_current: %v", err)
+		writeJSON(w, http.StatusInternalServerError, APIResponse{
+			OK:        false,
+			Message:   "database scan failed",
+			ErrorCode: "db_scan_error",
+		})
+		return
+	}
+
+	item.LastSampleTime = lastSampleTime.Format(time.RFC3339)
+	item.UpdatedAt = updatedAt.Format(time.RFC3339)
+
+	items = append(items, item)
+}
+
+	if err := rows.Err(); err != nil {
+		log.Printf("Error iterando filas de network_status_current: %v", err)
+		writeJSON(w, http.StatusInternalServerError, APIResponse{
+			OK:        false,
+			Message:   "database rows error",
+			ErrorCode: "db_rows_error",
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, CurrentStatusResponse{
+		OK:    true,
+		Items: items,
 	})
 }
 
